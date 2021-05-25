@@ -126,6 +126,8 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
         params = unfreeze(params) 
         params['params'] = nn_dic.item()['params']
         params = freeze(params)
+#         print(params)
+
     f.close()
     init_params = params
     
@@ -223,36 +225,44 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
         grad_fn = jax.value_and_grad(f_loss)
         loss, grad = grad_fn(optimizer.target,rho_g,batch)
         optimizer = optimizer.apply_gradient(grad) #, {"learning_rate": lr}
-        return optimizer, loss
+        return optimizer, (loss, grad)
 
-    @jit
-    def train(rho_g,init_params):
-        optimizer = optim.Adam(learning_rate=lr,weight_decay=w_decay).create(init_params)
+#     @jit
+    def train(rho_g,nn_params):
+        optimizer = optim.Adam(learning_rate=lr,weight_decay=w_decay).create(nn_params)
         optimizer = jax.device_put(optimizer)    
            
+        train_loss = []  
         loss0 = 1E16
         loss0_tot = 1E16
         itercount = itertools.count()
         f_params = init_params
         for epoch in range(n_epochs):
             for _ in range(n_batches):
-                optimizer, loss = train_step(optimizer, rho_g,next(batches))
-        
+                optimizer, loss_and_grad = train_step(optimizer, rho_g,next(batches))
+                loss, grad = loss_and_grad
+            f = open(f_out,'a+')
+            print(i,loss,file=f)
+            f.close()
+            train_loss.append(loss)
 #             params = optimizer.target
 #             loss_tot = f_validation(params)
         
+        nn_params = optimizer.target
 
-        return optimizer.target,loss
+        return nn_params,loss_and_grad, train_loss
 
     @jit
     def val_step(optimizer,nn_params):#, learning_rate_fn, model
     
-        nn_params, loss_train = train(optimizer.target,nn_params)
+        rho_g_prev = optimizer.target
+        nn_params, loss_and_grad_train, train_loss_iter = train(rho_g_prev,nn_params)
+        loss_train, grad_loss_train = loss_and_grad_train
         
         grad_fn_val = jax.value_and_grad(f_loss, argnums=1)
-        loss, grad = grad_fn_val(nn_params,optimizer.target,Dval)
-        optimizer = optimizer.apply_gradient(grad) #, {"learning_rate": lr}
-        return optimizer.target, nn_params, loss
+        loss_val, grad_val = grad_fn_val(nn_params,optimizer.target,Dval)
+        optimizer = optimizer.apply_gradient(grad_val) #, {"learning_rate": lr}
+        return optimizer.target, nn_params, (loss_val,loss_train,train_loss_iter), (grad_loss_train,grad_val)
 
  #     Initilialize rho_G   
     rng = random.PRNGKey(0)
@@ -264,14 +274,24 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
     optimizer_out = optim.Adam(learning_rate=2E-3,weight_decay=0.).create(init_G)
     optimizer_out = jax.device_put(optimizer_out)    
     
-    f = open(f_out,'a+')
-    for i in range(100):
+    f_params = init_params
+    for i in range(2000):
         start_va_time = time.time()
-        rho_g, f_params, loss = val_step(optimizer_out, init_params)
-        loss_tot = f_loss(f_params,rho_g,Dt)
+        rho_g, f_params, loss_all, grad_all = val_step(optimizer_out, f_params)
+        loss_val,loss_train,train_loss_iter  = loss_all
+        grad_loss_train,grad_val = grad_all
+        
+        loss0_tot = f_loss(f_params,rho_g,Dt)
+        
+        dict_output = serialization.to_state_dict(f_params)
+        jnp.save(f_w_nn,dict_output)#unfreeze()
         
         f = open(f_out,'a+')
-        print(i,rho_g, loss, loss_tot, (time.time() - start_va_time))
+#         print(i,rho_g, loss0, loss0_tot, (time.time() - start_va_time),file=f)
+        print(i,rho_g, loss_val,loss_train, (time.time() - start_va_time),file=f)
+#         print(train_loss_iter ,file=f) 
+#         print(grad_val,file=f)
+#         print(grad_loss_train,file=f)
         f.close()
 
 #     --------------------------------------
