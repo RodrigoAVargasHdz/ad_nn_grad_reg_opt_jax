@@ -169,7 +169,7 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
    #     ------
     @jit
     def f_loss(params,rho_g,batch):
-        rho_g = jnp.abs(rho_g)
+        rho_g = jnp.exp(rho_g)
         loss_ad_energy = f_loss_ad_energy(params,batch)
         loss_jac_energy = f_loss_jac(params,batch)
         loss = jnp.vdot(jnp.ones_like(loss_ad_energy),loss_ad_energy) + jnp.vdot(rho_g,loss_jac_energy)
@@ -229,18 +229,20 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
     rng = random.PRNGKey(0)
     rng, subkey = jax.random.split(rng)
         
-    rho_G0 = random.uniform(subkey,shape=(2,),minval=-1, maxval=0.01)
-
+    rho_G0 = random.uniform(subkey,shape=(2,),minval=5E-4, maxval=0.025)
+    rho_G0 = jnp.log(rho_G0)
+    print('Initial lambdas',rho_G0)
     init_G = rho_G0#
            
-    optimizer_out = optim.Adam(learning_rate=2E-3,weight_decay=0.).create(init_G)
+    optimizer_out = optim.Adam(learning_rate=2E-4,weight_decay=0.).create(init_G)
     optimizer_out = jax.device_put(optimizer_out)    
     
     f_params = init_params
    
-    for i in range(15000):
+    for i in range(50000):
         start_va_time = time.time()
         optimizer_out, f_params, loss_all, grad_all = val_step(optimizer_out, f_params)
+        
         rho_g = optimizer_out.target
         loss_val,loss_train,train_loss_iter = loss_all
         grad_loss_train,grad_val = grad_all
