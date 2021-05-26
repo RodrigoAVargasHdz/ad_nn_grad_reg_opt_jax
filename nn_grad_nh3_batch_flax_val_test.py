@@ -138,51 +138,12 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
     def nn_adiab(params,x):
         y_ad_pred = nn_model.apply(params,x)     
         return y_ad_pred 
-        
+
     @jit
     def jac_nn_adiab(params,x):
       g_y_pred = jacrev(nn_adiab,argnums=1)(params,x[None,:])
       return jnp.reshape(g_y_pred,(2,g_y_pred.shape[-1]))
-    
-    '''
-#     WRONG
-    @jit
-    def f_nac_coup_i(gH_diab,eigvect_): #for a single cartesian dimension
-        temp = jnp.dot(gH_diab,eigvect_[:,0])
-        return jnp.vdot(eigvect_[:,1],temp)
-    @jit
-    def f_nac_coup(params,x):
-        eigval_, eigvect_ = f_adiab(params,x)
-        gy_diab = jac_nn_diab(params,x)
-        gy_diab = jnp.reshape(gy_diab.T,(12,2,2))
-        g_coup = vmap(f_nac_coup_i,(0,None))(gy_diab,eigvect_)
-        return g_coup
-    '''
 
-#     --------------------------------------    
-#     Validation loss functions  
-      
-    @jit
-    def f_validation(params):
-        y_pred = nn_adiab(params, Xt)
-        diff_y = y_pred - yt
-        z = jnp.linalg.norm(diff_y)
-        return z
-
-    @jit
-    def f_jac_validation(params):
-        gX_pred = vmap(jac_nn_adiab,(None,0))(params,Xt)
-        diff_y = gX_pred - gXt
-        z = jnp.linalg.norm(diff_y)
-        return z
-    '''
-    @jit
-    def f_nac_validation(params):
-        g_nac_coup = vmap(f_nac_coup,(None,0))(params,Xt)
-        diff_y = g_nac_coup - gXct
-        z = jnp.linalg.norm(diff_y)
-        return z 
-    '''
 #     --------------------------------------    
 #    training loss functions  
     @jit
@@ -190,30 +151,28 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
         X_inputs,_,_,y_true = batch
         y_pred = nn_adiab(params,X_inputs)
         diff_y = y_pred - y_true #Ha2cm*
-        loss = jnp.linalg.norm(diff_y)
-        return loss
+        return jnp.linalg.norm(diff_y,axis=0)
 
     @jit
     def f_loss_jac(params,batch):
         X_inputs, gX_inputs,_,y_true = batch
         gX_pred = vmap(jac_nn_adiab,(None,0))(params,X_inputs)
         diff_g_X = gX_pred - gX_inputs
-        return jnp.linalg.norm(diff_g_X)
-    '''    
-    @jit
-    def f_loss_nac(params,batch):
-        X_inputs, _,gXc_inputs,y_true = batch
-        g_nac_coup = vmap(f_nac_coup,(None,0))(params,x)
-        diff_y = g_nac_coup - gXc_inputs
-        z = jnp.linalg.norm(diff_y)
-        return z 
-    '''
+        # jnp.linalg.norm(diff_g_X,axis=0)
+        
+        diff_g_X0 = diff_g_X[:,0,:]
+        diff_g_X1 = diff_g_X[:,1,:]
+        l0 = jnp.linalg.norm(diff_g_X0)
+        l1 = jnp.linalg.norm(diff_g_X1)
+        return jnp.stack([l0,l1]) 
+
    #     ------
     @jit
     def f_loss(params,rho_g,batch):
+        rho_g = jnp.abs(rho_g)
         loss_ad_energy = f_loss_ad_energy(params,batch)
         loss_jac_energy = f_loss_jac(params,batch)
-        loss = loss_ad_energy + rho_g[0]*loss_jac_energy
+        loss = jnp.vdot(jnp.ones_like(loss_ad_energy),loss_ad_energy) + jnp.vdot(rho_g,loss_jac_energy)
         return loss
 #     --------------------------------------
 #     Optimization  and Training   
@@ -239,11 +198,13 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
         f_params = init_params
         for epoch in range(n_epochs):
             for _ in range(n_batches):
-                optimizer, loss_and_grad = train_step(optimizer, rho_g,next(batches))
+                optimizer, loss_and_grad = train_step(optimizer,rho_g,next(batches))
                 loss, grad = loss_and_grad
-            f = open(f_out,'a+')
-            print(i,loss,file=f)
-            f.close()
+                
+#             f = open(f_out,'a+')
+#             print(i,loss,file=f)
+#             f.close()
+            
             train_loss.append(loss)
 #             params = optimizer.target
 #             loss_tot = f_validation(params)
@@ -262,23 +223,26 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
         grad_fn_val = jax.value_and_grad(f_loss, argnums=1)
         loss_val, grad_val = grad_fn_val(nn_params,optimizer.target,Dval)
         optimizer = optimizer.apply_gradient(grad_val) #, {"learning_rate": lr}
-        return optimizer.target, nn_params, (loss_val,loss_train,train_loss_iter), (grad_loss_train,grad_val)
+        return optimizer, nn_params, (loss_val,loss_train,train_loss_iter), (grad_loss_train,grad_val)
 
  #     Initilialize rho_G   
     rng = random.PRNGKey(0)
     rng, subkey = jax.random.split(rng)
         
-    rho_G = random.uniform(subkey,shape=(1,),minval=1E-5, maxval=0.1)
-    init_G = rho_G
+    rho_G0 = random.uniform(subkey,shape=(2,),minval=-1, maxval=0.01)
+
+    init_G = rho_G0#
            
     optimizer_out = optim.Adam(learning_rate=2E-3,weight_decay=0.).create(init_G)
     optimizer_out = jax.device_put(optimizer_out)    
     
     f_params = init_params
-    for i in range(2000):
+   
+    for i in range(15000):
         start_va_time = time.time()
-        rho_g, f_params, loss_all, grad_all = val_step(optimizer_out, f_params)
-        loss_val,loss_train,train_loss_iter  = loss_all
+        optimizer_out, f_params, loss_all, grad_all = val_step(optimizer_out, f_params)
+        rho_g = optimizer_out.target
+        loss_val,loss_train,train_loss_iter = loss_all
         grad_loss_train,grad_val = grad_all
         
         loss0_tot = f_loss(f_params,rho_g,Dt)
@@ -288,7 +252,9 @@ def main_opt(N,l,i0,nn_arq,act_fun,n_epochs,lr,w_decay,rho_g):
         
         f = open(f_out,'a+')
 #         print(i,rho_g, loss0, loss0_tot, (time.time() - start_va_time),file=f)
-        print(i,rho_g, loss_val,loss_train, (time.time() - start_va_time),file=f)
+        print(i,loss_val,loss_train, (time.time() - start_va_time),file=f)
+        print(jnp.exp(rho_g), file=f)
+        print(grad_val, file=f)
 #         print(train_loss_iter ,file=f) 
 #         print(grad_val,file=f)
 #         print(grad_loss_train,file=f)
@@ -388,7 +354,24 @@ if __name__ == "__main__":
 #     norm_gXt = jnp.linalg.norm(gXt,axis=2)
 #     j0 = jnp.argmax(norm_gXt,axis=0)
 #     rho_g = 10.0*(jnp.amax(ytr))**2/jnp.vdot(norm_gXt[j0],norm_gXt[j0])
-    
+
+#     --------------------------------------    
+#     Validation loss functions  
+      
+    @jit
+    def f_validation(params):
+        y_pred = nn_adiab(params, Xt)
+        diff_y = y_pred - yt
+        z = jnp.linalg.norm(diff_y)
+        return z
+
+    @jit
+    def f_jac_validation(params):
+        gX_pred = vmap(jac_nn_adiab,(None,0))(params,Xt)
+        diff_y = gX_pred - gXt
+        z = jnp.linalg.norm(diff_y)
+        return z
+
 
 '''
   
